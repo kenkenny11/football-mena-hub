@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://kenkenny11.github.io/football-mena-hub/sitemap.xml
