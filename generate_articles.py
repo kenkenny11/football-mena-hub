@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""Fetch multi-sport RSS headlines and create source-linked daily draft and prediction posts.
-
-Odds and fixtures are never invented. A daily prediction post is a clearly labeled
-editorial placeholder unless a future verified market feed is configured.
-"""
+"""Fetch multi-sport RSS headlines and refresh the schedule-backed NFL picks board."""
 from __future__ import annotations
 import argparse, datetime as dt, html, json, os, re, sys
+from zoneinfo import ZoneInfo
 import urllib.error, urllib.request, xml.etree.ElementTree as ET
 from pathlib import Path
+from predictions_refresh import refresh as refresh_prediction_board
 
 ROOT=Path(__file__).resolve().parent
 ARTICLES=ROOT/'articles.json'
+PREDICTIONS=ROOT/'predictions.json'
+ESPN_SCHEDULE='https://www.espn.com/nfl/schedule/_/week'
+ESPN_SCOREBOARD='https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates='
 FEEDS=[
  ('BBC Sport','Football','https://feeds.bbci.co.uk/sport/football/rss.xml'),
  ('ESPN Soccer','Football','https://www.espn.com/espn/rss/soccer/news'),
@@ -64,6 +65,13 @@ def make_prediction(sport:str,day:dt.date)->dict:
   'source_name':'Touchline Predictions Desk','source_url':'','summary':'Fixtures, odds and implied probabilities are not published without a current verifiable public source. This post is an editorial placeholder, not a betting recommendation.',
   'body':['Fixtures and bookmaker prices change frequently. No current fixture or odds source was verified for this sport in this edition, so no match pick or implied probability is presented.','When a source supplies decimal odds, implied probability is calculated as 100 divided by the decimal odds, before bookmaker margin. Predictions remain opinions and are never guarantees.'],
   'odds':None,'implied_probability':None,'confidence':'low','fixtures_verified':False,'draft':True,'updated_at':dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds')}
+def prediction_confidence(spread:float)->str:
+ size=abs(spread)
+ return 'high' if size>=8 else 'medium' if size>=4 else 'low'
+def prediction_rationale(favorite:str,spread:float,confidence:str)->str:
+ size=abs(spread)
+ band={'low':'a narrow line that points to a close contest','medium':'a meaningful but not overwhelming spread','high':'one of the slate’s largest spread gaps'}[confidence]
+ return f'The market lists {favorite} as the favorite by {size:g} points, {band}. The model-style lean follows that listed edge; confidence is {confidence} because the label is based on spread size alone, not a guarantee of the result.'
 def ai_write(title:str,summary:str,source_name:str,source_url:str,sport:str)->dict|None:
  key=os.environ.get('OPENAI_API_KEY')
  if not key:return None
@@ -78,8 +86,9 @@ def ai_write(title:str,summary:str,source_name:str,source_url:str,sport:str)->di
  except (urllib.error.URLError,TimeoutError,KeyError,ValueError,json.JSONDecodeError) as exc:print(f'AI generation failed for {title!r}; using cautious template: {exc}',file=sys.stderr)
  return None
 def run(limit:int=8,use_ai:bool=True)->int:
+ today=dt.datetime.now(ZoneInfo('America/New_York')).date()
  existing=json.loads(ARTICLES.read_text(encoding='utf-8')) if ARTICLES.exists() else []
- today=dt.date.today(); today_text=today.isoformat()
+ today_text=today.isoformat()
  seen={a.get('source_url','') for a in existing if a.get('source_url')}|{a.get('slug','') for a in existing if a.get('type')!='prediction'}
  collected=[]
  for name,sport,url in FEEDS:
@@ -92,13 +101,8 @@ def run(limit:int=8,use_ai:bool=True)->int:
   if item['source_url'] in seen or slug in seen:continue
   added.append(make_draft(item,use_ai));seen.add(item['source_url']);seen.add(slug)
   if len(added)>=limit:break
- predictions=[]
- for sport in SPORTS:
-  post=make_prediction(sport,today)
-  if post['slug'] not in seen:predictions.append(post);seen.add(post['slug'])
- # Replace prior generated placeholders so only today's per-sport cards remain.
- existing=[a for a in existing if not(a.get('type')=='prediction' and a.get('sport') in SPORTS)]
- combined=added+predictions+existing
+ predictions_updated=refresh_prediction_board(today)
+ combined=added+existing
  if combined!=existing:
   tmp=ARTICLES.with_suffix('.json.tmp');tmp.write_text(json.dumps(combined,ensure_ascii=False,indent=2)+'\n',encoding='utf-8');tmp.replace(ARTICLES)
  if added:
@@ -106,7 +110,7 @@ def run(limit:int=8,use_ai:bool=True)->int:
   for a in added:
    lines=[f"# {a['title']}",'',f"*{a['date']} | {a['source_name']} | DRAFT*",'',a['dek'],'',*[p for para in a['body'] for p in (para,'')],f"Source: [{a['source_name']}]({a['source_url']})",'']
    (drafts/f"{a['slug']}.md").write_text('\n'.join(lines),encoding='utf-8')
- print(f'Added {len(added)} sports article draft(s) and refreshed {len(predictions)} daily prediction post(s). Odds are left unavailable unless independently sourced.')
- return 0 if collected or added or predictions else 1
+ print(f'Added {len(added)} sports article draft(s); NFL predictions board refresh: {"updated" if predictions_updated else "unchanged"}.')
+ return 0 if collected or added or predictions_updated else 1
 if __name__=='__main__':
  parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--limit',type=int,default=8,help='maximum new feed stories');parser.add_argument('--no-ai',action='store_true',help='use the local cautious draft template');args=parser.parse_args();raise SystemExit(run(max(1,args.limit),not args.no_ai))
